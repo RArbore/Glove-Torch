@@ -13,19 +13,19 @@ torch.manual_seed(manualSeed)
 
 trial_name = "gentrial"
 
-DATA_SIZE = 9900
-VALID_DATA_SIZE = 100
+DATA_SIZE = 49000
+VALID_DATA_SIZE = 1000
 BATCH_SIZE = 100
-NUM_EPOCHS = 100
+NUM_EPOCHS = 10000
 NUM_BATCHES = int(DATA_SIZE / BATCH_SIZE)
 VALID_NUM_BATCHES = int(VALID_DATA_SIZE / BATCH_SIZE)
 
 WORD_VEC_DIMS = 300
-HIDDEN_SIZE = 16
-NUM_WORDS_INPUT = 10
+HIDDEN_SIZE = 64
 WORDS_GEN_OUT = 100
+NUM_LSTM_LAYERS = 3
 
-lr = 0.001
+lr = 0.0025
 b1 = 0.5
 b2 = 0.999
 
@@ -40,15 +40,25 @@ class Model(torch.nn.Module):
     def __init__(self):
         super(Model, self).__init__()
 
-        self.lstm = torch.nn.LSTM(WORD_VEC_DIMS, HIDDEN_SIZE, batch_first=True)
+        self.lstm = torch.nn.LSTM(WORD_VEC_DIMS, HIDDEN_SIZE, num_layers = NUM_LSTM_LAYERS, batch_first=True)
         
         self.linear = torch.nn.Sequential(
-            torch.nn.Linear(HIDDEN_SIZE*2, WORD_VEC_DIMS)
+            torch.nn.Linear(HIDDEN_SIZE, HIDDEN_SIZE),
+            torch.nn.Tanh(),
+            torch.nn.Linear(HIDDEN_SIZE, WORD_VEC_DIMS),
         )
 
-    def forward(self, input):
-        output, (h_n, c_n) = self.lstm(input)
-        return self.linear(torch.cat((h_n.permute(1, 0, 2).view(-1, HIDDEN_SIZE), c_n.permute(1, 0, 2).view(-1, HIDDEN_SIZE)), dim=1))
+    def forward(self, input, h_0 = None, c_0 = None):
+        
+        if h_0 is None or c_0 is None:
+            h_0 = torch.zeros(NUM_LSTM_LAYERS, input.size(0), HIDDEN_SIZE).to(device)
+            c_0 = torch.zeros(NUM_LSTM_LAYERS, input.size(0), HIDDEN_SIZE).to(device)
+        else:
+            print("hello")
+
+        output, (h_n, c_n) = self.lstm(input, (h_0, c_0))
+        return self.linear(output.permute(1, 0, 2).view(-1, HIDDEN_SIZE)).view(input.size(0), -1, WORD_VEC_DIMS), (h_n, c_n)
+        # return self.linear(torch.cat((h_n.permute(1, 0, 2).reshape(-1, HIDDEN_SIZE*NUM_LSTM_LAYERS), c_n.permute(1, 0, 2).reshape(-1, HIDDEN_SIZE*NUM_LSTM_LAYERS)), dim=1))
 
 def embed_words(to_embed, glove_vec, glove_words):
     length = len(to_embed)
@@ -59,12 +69,29 @@ def embed_words(to_embed, glove_vec, glove_words):
 
 def vec_to_word(vec, glove_vec, glove_words):
     copies = vec.view(1, WORD_VEC_DIMS).repeat((400000, 1))
+    dist = torch.exp(torch.mean((copies - glove_vec)**2, dim=1))
+    probs = torch.distributions.categorical.Categorical(1 - dist/torch.sum(dist))
+    return glove_words[probs.sample()]
+
+def print_vec_stats(vec, glove_vec, glove_words):
+    copies = vec.view(1, WORD_VEC_DIMS).repeat((400000, 1))
     dist = torch.mean((copies - glove_vec)**2, dim=1)
-    closest_index = torch.argmin(dist)
-    return glove_words[closest_index]
+    indices = []
+    while len(indices) < 10:
+        index = torch.argmin(dist)
+        dist[index] += 1000
+        indices.append(index)
+    print("######################\n")
+    for index in indices:
+        print(glove_words[index], dist[index] - 1000)
+    print("")
 
 def train_model(train_data, train_labels, glove_vec, glove_words): #2d list of words (reviews), 1d tensor of labels, 2d tensor of glove word vectors, 1d list of glove words    
     model = Model()
+    size = 0
+    for parameter in model.parameters():
+        size += parameter.view(-1).size(0)
+    print(size)
 
     current_milli_time = lambda: int(round(time.time() * 1000))
 
@@ -92,28 +119,38 @@ def train_model(train_data, train_labels, glove_vec, glove_words): #2d list of w
         for batch in range(NUM_BATCHES):
             opt.zero_grad()
             model = model.train()
+            '''
             reviews_list = []
-            #max_len = 0
+            max_len = 0
             for b in range(0, BATCH_SIZE):
                 review = embed_words(train_data[b+(batch*BATCH_SIZE)], glove_vec, glove_words).to(device)
+                reviews_list.append(review)
+            
                 review_len = review.size(0)
-                start_index = ((review_len - NUM_WORDS_INPUT - 1)*torch.rand((1))).long()
-                reviews_list.append(review[start_index:start_index + NUM_WORDS_INPUT + 1])
-            #    review_len = review.size(0)
-            #    if (review_len > max_len):
-            #        max_len = review_len
+                if (review_len > max_len):
+                    max_len = review_len
 
-            #for i in range(len(reviews_list)):
-            #    s = reviews_list[i].size(0)
-            #    reviews_list[i] = torch.cat((torch.zeros(max_len-s, WORD_VEC_DIMS).to(device), reviews_list[i])).to(device)
+            for i in range(len(reviews_list)):
+                s = reviews_list[i].size(0)
+                reviews_list[i] = torch.cat((torch.zeros(max_len-s, WORD_VEC_DIMS).to(device), reviews_list[i])).to(device)
             
             reviews_stack = torch.stack(reviews_list).to(device)
-            batch_input = reviews_stack[:, :NUM_WORDS_INPUT, :]
-            batch_labels = reviews_stack[:, NUM_WORDS_INPUT:, :]
+            
+            torch.save(reviews_stack, "IMDB_DATA/b"+str(batch)+".pt")
+            '''
+            reviews_stack = torch.load("IMDB_DATA/b"+str(batch)+".pt").to(device)
+
+            batch_input = reviews_stack[:, :-1, :]
+            batch_labels = reviews_stack[:, 1:, :]
 
             #batch_labels = train_labels[batch*BATCH_SIZE:(batch+1)*BATCH_SIZE].to(device)
 
-            output = model(batch_input)
+            h_0 = torch.zeros(NUM_LSTM_LAYERS, BATCH_SIZE, HIDDEN_SIZE).to(device)
+            c_0 = torch.zeros(NUM_LSTM_LAYERS, BATCH_SIZE, HIDDEN_SIZE).to(device)
+ 
+            output = model(batch_input, (h_0, c_0))
+            output = output[0]
+            #print_vec_stats(output[0].to(cpu), glove_vec, glove_words)
 
             #perc_correct += torch.mean((torch.sign(output).view(-1) == batch_labels).float())
 
@@ -127,30 +164,36 @@ def train_model(train_data, train_labels, glove_vec, glove_words): #2d list of w
         with torch.no_grad():
             for batch in range(VALID_NUM_BATCHES):
                 model = model.eval()
-
+                '''
                 reviews_list = []
-                #max_len = 0
+                max_len = 0
                 for b in range(0, BATCH_SIZE):
                     review = embed_words(train_data[b+(batch*BATCH_SIZE)+DATA_SIZE], glove_vec, glove_words).to(device)
+                    reviews_list.append(review)
                     review_len = review.size(0)
-                    start_index = ((review_len - NUM_WORDS_INPUT - 1)*torch.rand((1))).long()
-                    reviews_list.append(review[start_index:start_index + NUM_WORDS_INPUT + 1])
-                #    review_len = review.size(0)
-                #    if (review_len > max_len):
-                #        max_len = review_len
+                    if (review_len > max_len):
+                        max_len = review_len
 
-                #for i in range(len(reviews_list)):
-                #    s = reviews_list[i].size(0)
-                #    reviews_list[i] = torch.cat((torch.zeros(max_len-s, WORD_VEC_DIMS).to(device), reviews_list[i])).to(device)
+                for i in range(len(reviews_list)):
+                    s = reviews_list[i].size(0)
+                    reviews_list[i] = torch.cat((torch.zeros(max_len-s, WORD_VEC_DIMS).to(device), reviews_list[i])).to(device)
 
                 reviews_stack = torch.stack(reviews_list).to(device)
-                batch_input = reviews_stack[:, :NUM_WORDS_INPUT, :]
-                batch_labels = reviews_stack[:, NUM_WORDS_INPUT:, :]
+            
+                torch.save(reviews_stack, "IMDB_DATA/v"+str(batch)+".pt")
+                '''
+                reviews_stack = torch.load("IMDB_DATA/v"+str(batch)+".pt")
+
+                batch_input = reviews_stack[:, :-1, :]
+                batch_labels = reviews_stack[:, 1:, :]
 
                 #batch_labels = train_labels[batch*BATCH_SIZE:(batch+1)*BATCH_SIZE].to(device)
 
-                output = model(batch_input)
+                h_0 = torch.zeros(NUM_LSTM_LAYERS, BATCH_SIZE, HIDDEN_SIZE).to(device)
+                c_0 = torch.zeros(NUM_LSTM_LAYERS, BATCH_SIZE, HIDDEN_SIZE).to(device)
 
+                output = model(batch_input, (h_0, c_0))
+                output = output[0]
                 #perc_correct += torch.mean((torch.sign(output).view(-1) == batch_labels).float())
 
                 loss = torch.nn.functional.mse_loss(output.view(-1), batch_labels.reshape(-1))      
@@ -159,34 +202,21 @@ def train_model(train_data, train_labels, glove_vec, glove_words): #2d list of w
                 if (math.isnan(epoch_loss)):
                     print("NaN!")
 
-                '''
-                if batch == 0:
-                    f_p = open(folder + "/epoch"+str(epoch+1) + "/positives.txt", "a")
-                    f_n = open(folder + "/epoch"+str(epoch+1) + "/negatives.txt", "a")
-                    pred = torch.sign(output).view(-1)
-                    for b in range(0, BATCH_SIZE):
-                        review = train_data[b+DATA_SIZE]
-                        if (pred[b] == 1):
-                            for w in review:
-                                f_p.write(w+" ")
-                            f_p.write("\n")
-                        else:
-                            for w in review:
-                                f_n.write(w+" ")
-                            f_n.write("\n")
-                    f_p.close()
-                    f_n.close()
-                '''
         f_sample = open(folder + "/epoch"+str(epoch+1) + "/sample.txt", "a")
         
-        working_input = train_data[DATA_SIZE][0:NUM_WORDS_INPUT]
+        working_input = train_data[0][0:1]
+        h_n = torch.zeros(NUM_LSTM_LAYERS, 1, HIDDEN_SIZE).to(device)
+        c_n = torch.zeros(NUM_LSTM_LAYERS, 1, HIDDEN_SIZE).to(device)
 
         for word in working_input:
             f_sample.write(word+" ")
 
         for w in range(WORDS_GEN_OUT):
-            vec = model(embed_words(working_input, glove_vec, glove_words).to(device).view(1, -1, WORD_VEC_DIMS)).view(-1)
+            vec, (h_n, c_n) = model(embed_words(working_input, glove_vec, glove_words).to(device).view(1, -1, WORD_VEC_DIMS), (h_n, c_n))
+            vec = vec[0].view(-1)
+            #print(vec)
             new_word = vec_to_word(vec.to(cpu), glove_vec, glove_words)
+            #print(new_word+"\n")
             working_input = working_input[1:]
             working_input.append(new_word)
             f_sample.write(new_word+" ")

@@ -57,7 +57,7 @@ class Model(torch.nn.Module):
             print("hello")
 
         output, (h_n, c_n) = self.lstm(input, (h_0, c_0))
-        return self.linear(output.permute(1, 0, 2).view(-1, HIDDEN_SIZE)).view(input.size(0), -1, WORD_VEC_DIMS), (h_n, c_n)
+        return self.linear(output.reshape(-1, HIDDEN_SIZE)).reshape(input.size(0), -1, WORD_VEC_DIMS), (h_n, c_n)
         # return self.linear(torch.cat((h_n.permute(1, 0, 2).reshape(-1, HIDDEN_SIZE*NUM_LSTM_LAYERS), c_n.permute(1, 0, 2).reshape(-1, HIDDEN_SIZE*NUM_LSTM_LAYERS)), dim=1))
 
 def embed_words(to_embed, glove_vec, glove_words):
